@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 *.iml
 .gradle
 /local.properties
@@ -13,3 +14,9 @@
 .externalNativeBuild
 .cxx
 local.properties
+=======
+﻿__pycache__/
+*.pyc
+.DS_Store
+.env
+>>>>>>> 4db664d (“推薦系統”)

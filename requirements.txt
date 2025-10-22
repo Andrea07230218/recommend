@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic
+requests
+pymongo
+openai
+google-generativeai
+langgraph
+markdown2
+jinja2
+python-multipart
+python-dotenv

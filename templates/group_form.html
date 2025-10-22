@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <title>團體旅遊推薦表單</title>
+  <style>
+    body { font-family: sans-serif; padding: 2em; max-width: 720px; margin: auto; }
+    label { display: block; margin-top: 1em; }
+    input, select, textarea { width: 100%; padding: 0.4em; }
+    button { margin-top: 1em; padding: 0.5em 1em; }
+    fieldset { border: 1px solid #aaa; margin-top: 1em; padding: 1em; }
+    .checkbox-group { display: flex; flex-wrap: wrap; gap: 1em; margin-top: 0.5em; }
+    .checkbox-group label { flex: 1 1 45%; }
+    #result { margin-top: 2em; border-top: 2px solid #ccc; padding-top: 1em; }
+    .radio-row { display:flex; gap:1.25em; align-items:center; margin:.35em 0 .75em; }
+    .muted { color:#666; font-size:.9em; }
+    @keyframes loading { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+  </style>
+</head>
+<body>
+
+  <h2>團體旅遊推薦系統</h2>
+
+  <form id="groupForm">
+    <label>行程名稱：
+      <input type="text" name="trip_name" value="台南一日遊" required/>
+    </label>
+
+    <!-- 多城市選擇 UI -->
+    <label>旅遊城市（可複選，依點選順序排序）：</label>
+    <input class="input1" id="citySearch" type="text" placeholder="搜尋城市..." />
+    <div id="cityList" style="max-height:250px;overflow:auto;padding:.5em;border:1px solid #ddd;border-radius:6px;margin-top:.4em;"></div>
+    <div style="margin-top:.6em;">
+      <strong>已選城市順序：</strong>
+      <span id="selectedCities"></span>
+      <div class="muted" style="margin-top:.25em;">
+        提示：點選上方籤籤可移除。也可直接在搜尋框輸入後點選。
+      </div>
+    </div>
+    <!-- 送出時會把選取的城市用逗號序列化進這個欄位 -->
+    <input type="hidden" id="locations" name="locations">
+
+    <label>旅遊日期：
+      <input type="date" name="date" value="2025-08-05" required />
+    </label>
+
+    <label>旅遊天數：
+      <input type="number" name="days" value="1" min="1" required />
+    </label>
+
+    <label>活動時間：
+      <input type="text" name="time_range" value="09:00–20:00" required />
+    </label>
+
+    <!-- ✅ 交通方式（只送 transportation） -->
+    <label>交通方式：</label>
+    <div class="radio-row">
+      <label style="width:auto;"><input type="radio" name="transportation" value="public" checked> 大眾運輸</label>
+      <label style="width:auto;"><input type="radio" name="transportation" value="drive"> 汽車</label>
+    </div>
+    <div class="muted">＊選「大眾運輸」→ 後端 travel.mode = <code>transit</code>；選「汽車」→ <code>driving</code>。</div>
+
+    <label>選擇要加入的使用者：
+      <select id="userSelector">
+        <option value="">-- 選擇使用者 --</option>
+      </select>
+      <button type="button" onclick="addSelectedUser()">➕ 加入成員</button>
+    </label>
+
+    <fieldset id="groupMembers">
+      <legend>團體成員資訊</legend>
+    </fieldset>
+
+    <label>指定主揪（僅主揪填寫偏好）：
+      <select id="leaderSelector" name="leader_id" required>
+        <option value="">-- 請選擇主揪 --</option>
+      </select>
+    </label>
+
+    <fieldset id="leaderPreferences" style="display:none;">
+      <legend>主揪偏好與需求</legend>
+
+      <label>主揪勾選偏好：</label>
+      <div class="checkbox-group">
+        <label><input type="checkbox" name="preferences[]" value="自然探索"> 自然探索</label>
+        <label><input type="checkbox" name="preferences[]" value="藝術文青"> 藝術文青</label>
+        <label><input type="checkbox" name="preferences[]" value="休閒放鬆"> 休閒放鬆</label>
+        <label><input type="checkbox" name="preferences[]" value="文化歷史"> 文化歷史</label>
+        <label><input type="checkbox" name="preferences[]" value="美食巡禮"> 美食巡禮</label>
+        <label><input type="checkbox" name="preferences[]" value="親子友善"> 親子友善</label>
+        <label><input type="checkbox" name="preferences[]" value="購物娛樂"> 購物娛樂</label>
+        <label><input type="checkbox" name="preferences[]" value="社群打卡"> 社群打卡</label>
+      </div>
+
+      <label>主揪想避開的地點類型（可複選）：</label>
+      <div class="checkbox-group">
+        <label><input type="checkbox" name="exclude[]" value="人多"> 人多</label>
+        <label><input type="checkbox" name="exclude[]" value="商業化"> 商業化</label>
+        <label><input type="checkbox" name="exclude[]" value="熱門打卡點"> 熱門打卡點</label>
+        <label><input type="checkbox" name="exclude[]" value="觀光團常去"> 觀光團常去</label>
+      </div>
+
+      <label>其他需求或備註：</label>
+      <textarea name="notes" rows="3" placeholder="例如：想看夕陽、第一天不要太早、有人行動不便等..."></textarea>
+    </fieldset>
+
+    <button type="submit">送出推薦</button>
+  </form>
+
+  <div id="progress" style="display:none; margin-top:1em;">
+    <strong>⏳ 行程生成中，請稍候...</strong>
+    <div style="width: 100%; background: #eee; border-radius: 6px; overflow: hidden;">
+      <div id="progress-bar" style="height: 10px; width: 100%; background: linear-gradient(90deg, #0099ff, #66ccff); animation: loading 1s linear infinite;"></div>
+    </div>
+  </div>
+
+  <div id="result"></div>
+
+<script>
+  // -------- 多城市 UI --------
+  const citySearch = document.getElementById('citySearch');
+  const cityList = document.getElementById('cityList');
+  const selectedWrap = document.getElementById('selectedCities');
+  const locationsHidden = document.getElementById('locations');
+
+  const ALL_CITIES = [
+    "臺北市","新北市","基隆市","桃園市","新竹市","新竹縣","苗栗縣",
+    "臺中市","彰化縣","南投縣","雲林縣","嘉義市","嘉義縣",
+    "臺南市","高雄市","屏東縣","宜蘭縣","花蓮縣","臺東縣",
+    "澎湖縣","金門縣","連江縣"
+  ];
+  let selectedCities = [];
+
+  function renderCityList(q = "") {
+    const kw = q.trim();
+    const data = ALL_CITIES.filter(c => !kw || c.includes(kw));
+    cityList.innerHTML = "";
+    data.forEach(c => {
+      const tag = document.createElement("span");
+      const active = selectedCities.includes(c);
+      tag.textContent = c + (active ? " ✓" : "");
+      tag.style.cssText = `
+        display:inline-block;margin:.25em .4em;padding:.25em .6em;
+        border-radius:999px;border:1px solid ${active?'#333':'#aaa'};
+        cursor:pointer; user-select:none;
+      `;
+      tag.onclick = () => toggleCity(c);
+      cityList.appendChild(tag);
+    });
+  }
+
+  function toggleCity(c) {
+    if (selectedCities.includes(c)) {
+      selectedCities = selectedCities.filter(x => x !== c);
+    } else {
+      selectedCities.push(c);
+    }
+    syncSelected();
+    renderCityList(citySearch.value);
+  }
+
+  function syncSelected() {
+    selectedWrap.innerHTML = "";
+    selectedCities.forEach(c => {
+      const chip = document.createElement("span");
+      chip.textContent = c + " ✕";
+      chip.style.cssText = `
+        display:inline-block;margin:.2em .3em;padding:.2em .5em;
+        background:#f3f3f3;border:1px solid #ccc;border-radius:999px;cursor:pointer;
+      `;
+      chip.onclick = () => toggleCity(c);
+      selectedWrap.appendChild(chip);
+    });
+    locationsHidden.value = selectedCities.join(","); // 逗號序列化；後端會正規化成陣列
+  }
+
+  citySearch?.addEventListener('input', (e) => renderCityList(e.target.value));
+  selectedCities = [];
+  renderCityList();
+  syncSelected();
+
+  // -------- 其餘互動邏輯 --------
+  let allUsers = [];
+  let addedUsernames = new Set();
+  let memberCount = 0;
+
+  async function fetchUsers() {
+    const res = await fetch('/users/all');
+    allUsers = await res.json();
+    const selector = document.getElementById('userSelector');
+    allUsers.forEach(user => {
+      const opt = document.createElement('option');
+      opt.value = user.username;
+      opt.textContent = user.username;
+      selector.appendChild(opt);
+    });
+  }
+
+  function addSelectedUser() {
+    const selector = document.getElementById('userSelector');
+    const username = selector.value;
+    if (!username || addedUsernames.has(username)) return;
+    const user = allUsers.find(u => u.username === username);
+    if (!user) return;
+
+    const leaderSelect = document.getElementById("leaderSelector");
+    const opt = document.createElement("option");
+    opt.value = user.username;
+    opt.textContent = user.username;
+    leaderSelect.appendChild(opt);
+
+    const memberHTML = `
+      <div class="member">
+        <hr>
+        <label>使用者 ID：<input type="text" name="members[${memberCount}][user_id]" value="${user.username}" readonly /></label>
+      </div>
+    `;
+    document.getElementById("groupMembers").insertAdjacentHTML("beforeend", memberHTML);
+    addedUsernames.add(username);
+    memberCount++;
+  }
+
+  document.getElementById("leaderSelector").addEventListener("change", function () {
+    document.getElementById("leaderPreferences").style.display = this.value ? "block" : "none";
+  });
+
+  // -------- 表單送出 --------
+  document.getElementById("groupForm").addEventListener("submit", async function(e) {
+    e.preventDefault();
+
+    const form = e.target;
+    const trip_name = form.trip_name.value.trim();
+
+    // 多城市
+    const locations = (locationsHidden.value || "").trim();
+    if (!locations) { alert("請至少選擇一個旅遊城市"); return; }
+
+    const date = form.date.value;
+    const time_range = form.time_range.value;
+    const days = Math.max(1, parseInt(form.days.value, 10) || 1);
+    const leader_id = form.leader_id.value;
+    if (!leader_id) { alert("請指定主揪"); return; }
+
+    const memberEls = Array.from(form.querySelectorAll(".member"));
+    if (memberEls.length === 0) { alert("請至少加入 1 位成員"); return; }
+
+    const members = memberEls.map(el => ({
+      user_id: el.querySelector(`input[name*="[user_id]"]`).value
+    }));
+
+    const preferences = Array.from(form.querySelectorAll('input[name="preferences[]"]:checked')).map(i => i.value);
+    const exclude = Array.from(form.querySelectorAll('input[name="exclude[]"]:checked')).map(i => i.value);
+    const notes = (form.notes?.value || "").trim();
+
+    // ✅ 讀取交通方式（只送 transportation）
+    const transportation = form.querySelector('input[name="transportation"]:checked')?.value || "public";
+
+    const payload = {
+      trip_name,
+      locations, date, time_range, days,
+      leader_id, preferences, exclude, notes, members,
+      transportation   // ✅ 只送這個鍵
+    };
+
+    document.getElementById("progress").style.display = "block";
+    document.getElementById("result").innerHTML = "";
+
+    try {
+      const res = await fetch("/recommend/group", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) throw new Error("行程推薦失敗");
+
+      const result = await res.json();
+      const resultDiv = document.getElementById("result");
+      resultDiv.innerHTML = (result.html && result.html.trim().length > 0)
+        ? `<h2>🎉 團體推薦行程</h2>\n${result.html}`
+        : `<p>❌ 未收到行程內容，請稍後再試。</p>`;
+    } catch (err) {
+      alert("❌ 發生錯誤：" + err.message);
+      console.error(err);
+    } finally {
+      document.getElementById("progress").style.display = "none";
+    }
+  });
+
+  fetchUsers();
+</script>
+
+</body>
+</html>
