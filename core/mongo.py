@@ -1,3 +1,4 @@
+# core/mongo.py
 from pymongo import MongoClient
 from datetime import datetime, timedelta  # ✅ 擴充：支援 lookback_days
 from markdown2 import markdown as md
@@ -14,6 +15,7 @@ db = mongo_client["tripDemo-shan"]
 users_collection = db["users"]
 form_collection = db["forms"]             # ✅ 新增集合（沿用你的既有命名）
 itineraries_collection = db["itineraries"]
+chatroom_collection = db["chatroom"]
 
 # === 可選：建立常用索引，第一次部署或上線前呼叫一次即可 =========================
 def ensure_indexes() -> None:
@@ -146,15 +148,48 @@ def itinerary_linkedlist_to_day_structure(user_id, head, form_type="personal", t
     return final_doc
 
 def save_structured_linked_itinerary(user_id, head, form_type="personal", trip_preference_id=None, created_at=None):
+    """
+    儲存結構化的行程。
+    同時，"更新或建立 (upsert)" 一個 chatroom 文件，確保它存在且 trip_id 正確。
+    """
+    
+    # 1. 準備行程文件
     doc = itinerary_linkedlist_to_day_structure(
         user_id=user_id,
         head=head,
         form_type=form_type,
         trip_preference_id=trip_preference_id,
-        created_at=created_at
+        created_at=created_at or datetime.utcnow() 
     )
-    db["linked_itineraries"].insert_one(doc)
+    
+    # 2. 插入行程到 "linked_itineraries" 集合
+    result = db["linked_itineraries"].insert_one(doc)
+    
+    # 3. 取得剛剛插入的行程 _id
+    trip_id = result.inserted_id
 
+    # 4. 定義 "查詢條件" (Query Filter)
+    query_filter = {
+        "trip_id": trip_id
+    }
+
+    # 5. 定義 "更新/建立" 的內容 (Update Operation)
+    update_operation = {
+        "$set": {
+            "trip_id": trip_id
+        }
+    }
+
+    # 6. 執行 "Upsert" 操作
+    #    (這裡會正確使用檔案頂部定義的 chatroom_collection)
+    chatroom_collection.update_one(
+        query_filter, 
+        update_operation, 
+        upsert=True 
+    )
+
+    # 7. 回傳 trip_id
+    return trip_id
 
 # ====================== 新增：行為資料讀取與彙整（資料層） =====================
 
