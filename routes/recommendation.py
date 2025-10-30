@@ -11,8 +11,40 @@ import math
 from typing import Optional, List, Dict, Any, Tuple, Set
 from pathlib import Path
 import json
+import asyncio 
+from fastapi import APIRouter, Request, HTTPException
+import httpx
+from datetime import datetime, timedelta
+from dateutil import parser
+
+# 引入 Pydantic 模型
+from pydantic import BaseModel, Field # 👈 1. 匯入
 
 router = APIRouter()
+
+# --- 🔽🔽 2. 【修改 Pydantic 模型以匹配 UI】 🔽🔽 ---
+
+# 1. 定義 Android App 會傳來的 Request Body
+class StartInfoRequest(BaseModel):
+    placeId: str
+    lat: float
+    lng: float
+
+# 2. 定義要回傳給 App 的 Response Body (與 Kotlin data class 匹配)
+class WeatherInfo(BaseModel):
+    # ‼️ 欄位名稱 *完全* 依照您 UI 想要的
+    summary: str = "未知"
+    temperatureC: int = 0
+    rainProbability: Optional[int] = None # 降雨機率 % (允許 null)
+
+class StartInfo(BaseModel):
+    placeId: str
+    weather: WeatherInfo = Field(default_factory=WeatherInfo)
+    openNow: bool = False
+    openStatusText: str = "營業狀態未知"
+    alternatives: List[Any] = Field(default_factory=list)
+    page: int = 0
+    openingHours: List[str] = Field(default_factory=list) # 👈 營業時間欄位
 
 # =========================
 # 記錄檔存取
@@ -284,38 +316,107 @@ def within_user_activity_window(activity_time: Dict[str, str]) -> bool:
 # =========================
 # 天氣 / Geocode
 # =========================
-@router.get("/check_weather")
-async def check_weather(request: Request, lat: float, lon: float):
+@router.get("/weather")
+async def get_weather(request: Request, lat: float, lon: float):
+    """
+    取得天氣資訊並判斷未來 1 小時是否會下雨
+    供 Android App 使用
+    """
+    print(f"\n=== /weather called: lat={lat}, lon={lon} ===")
+    
     weather_key = request.app.state.openweather_api_key
     gmap_key = request.app.state.google_api_key
-    forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={weather_key}&units=metric"
-    current_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={weather_key}&units=metric"
-
+    
+    # 檢查 API Keys
+    if not weather_key:
+        print("[ERROR] OpenWeather API Key not found")
+        raise HTTPException(status_code=500, detail="OpenWeather API Key 未設定")
+    
+    if not gmap_key:
+        print("[ERROR] Google Maps API Key not found")
+        raise HTTPException(status_code=500, detail="Google Maps API Key 未設定")
+    
+    print(f"[DEBUG] Weather Key: {weather_key[:10]}..., GMaps Key: {gmap_key[:10]}...")
+    
+    # API URLs
+    forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={weather_key}&units=metric&lang=zh_tw"
+    current_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={weather_key}&units=metric&lang=zh_tw"
+    geocode_url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&language=zh-TW&key={gmap_key}"
+    
     async with httpx.AsyncClient(timeout=15) as client:
-        forecast_res = await client.get(forecast_url)
-        current_res = await client.get(current_url)
-        geo_res = await client.get(f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&language=zh-TW&key={gmap_key}")
-
+        try:
+            print("[DEBUG] Fetching weather data...")
+            forecast_res = await client.get(forecast_url)
+            current_res = await client.get(current_url)
+            geo_res = await client.get(geocode_url)
+            
+            print(f"[DEBUG] Forecast status: {forecast_res.status_code}")
+            print(f"[DEBUG] Current status: {current_res.status_code}")
+            print(f"[DEBUG] Geocode status: {geo_res.status_code}")
+            
+            forecast_res.raise_for_status()
+            current_res.raise_for_status()
+            geo_res.raise_for_status()
+            
+        except httpx.HTTPStatusError as e:
+            print(f"[ERROR] API request failed: {e.response.status_code}")
+            print(f"[ERROR] Response: {e.response.text}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"天氣 API 請求失敗: {e.response.text}"
+            )
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}")
+            raise HTTPException(status_code=500, detail=f"查詢天氣時發生錯誤: {str(e)}")
+    
+    # 解析回應
     forecast_data = forecast_res.json()
     current_data = current_res.json()
     geo_data = geo_res.json()
-
-    if "list" not in forecast_data or "weather" not in current_data:
-        return {"error": "Invalid weather response"}
-
+    
+    # 驗證資料
+    if "list" not in forecast_data:
+        print("[ERROR] Invalid forecast data")
+        raise HTTPException(status_code=500, detail="天氣預報資料格式錯誤")
+    
+    if "weather" not in current_data or "main" not in current_data:
+        print("[ERROR] Invalid current weather data")
+        raise HTTPException(status_code=500, detail="當前天氣資料格式錯誤")
+    
+    # 找出最接近 1 小時後的預報
     target_time = datetime.utcnow() + timedelta(hours=1)
-    closest = min(forecast_data["list"], key=lambda item: abs(parser.parse(item["dt_txt"]) - target_time))
-    pop = closest.get("pop", 0)
-    weather = closest.get("weather", [])
-    current_desc = current_data["weather"][0]["description"] if current_data.get("weather") else "未知"
-    location_name = geo_data["results"][0]["formatted_address"] if geo_data.get("results") else "你的位置"
-
-    return {
-        "will_rain": pop > 0.4 or any("rain" in (w.get("main","").lower()) for w in weather),
-        "rain_data": [closest],
-        "desc": current_desc,
-        "location": location_name
+    closest = min(
+        forecast_data["list"], 
+        key=lambda item: abs(parser.parse(item["dt_txt"]) - target_time)
+    )
+    
+    # 計算降雨機率
+    pop = closest.get("pop", 0)  # Probability of Precipitation
+    forecast_weather = closest.get("weather", [])
+    
+    # 判斷是否會下雨（降雨機率 > 40% 或天氣描述包含 rain）
+    will_rain = pop > 0.4 or any("rain" in w.get("main", "").lower() for w in forecast_weather)
+    
+    # 當前天氣
+    current_weather = current_data.get("weather", [{}])[0]
+    temperature = current_data.get("main", {}).get("temp")
+    
+    # 位置名稱
+    location_name = "未知位置"
+    if geo_data.get("results"):
+        location_name = geo_data["results"][0].get("formatted_address", "未知位置")
+    
+    result = {
+        "will_rain": will_rain,
+        "rain_probability": pop,
+        "temperature": temperature,
+        "description": current_weather.get("description", "未知"),
+        "location": location_name,
+        "forecast_time": closest.get("dt_txt")
     }
+    
+    print(f"[SUCCESS] Weather data: will_rain={will_rain}, pop={pop}, temp={temperature}°C")
+    return result
 
 # ### 強化：支援 city_hint，避免抓到錯城市
 @router.get("/geocode")
@@ -543,7 +644,7 @@ async def get_attraction_categories(request: Request, name: str) -> List[str]:
 輸出格式範例：博物館, 藝術, 文化
 """
     result = openai_client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "只輸出標籤清單，最多三個，使用逗號分隔。"},
             {"role": "user", "content": prompt.strip()}
@@ -560,10 +661,10 @@ async def is_indoor_place(request: Request, name: str) -> bool:
 以下列出一個台灣景點的名稱，請你判斷它是否為【室內景點】。
 請直接回答「是」或「否」。
 
-景點名稱：{name}
+景點名称：{name}
 """
     result = openai_client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "你是一個旅遊分類助理，負責判斷是否為室內場所。"},
             {"role": "user", "content": prompt.strip()}
@@ -576,7 +677,7 @@ async def is_indoor_place(request: Request, name: str) -> bool:
 async def generate_gpt_recommendations(request: Request, prompt: str) -> List[Dict[str, str]]:
     openai_client = OpenAI(api_key=request.app.state.openai_api_key)
     response = openai_client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "你是一個旅遊推薦助手，根據使用者偏好提供室內景點建議。請以繁體中文回應。"},
             {"role": "user", "content": prompt.strip()}
@@ -1179,3 +1280,178 @@ async def recommend_alternative(request: Request):
         "success": True,
         "recommendations": top
     })
+
+# --- 🔽🔽 4. 【修改輔助函式 (回傳 openingHours)】 🔽🔽 ---
+
+async def _get_google_place_details(request: Request, place_id: str) -> Dict[str, Any]:
+    """
+    (輔助函式) 呼叫 Google Places Details API 獲取營業狀態
+    """
+    google_api_key = request.app.state.google_api_key
+    if not google_api_key:
+        return {"open_now": False, "status_text": "未設定 Google API Key", "opening_hours": []} # 👈 修改
+
+    detail_url = "https://maps.googleapis.com/maps/api/place/details/json"
+    detail_params = {
+        "place_id": place_id,
+        "key": google_api_key,
+        "fields": "opening_hours,business_status", # 只需要營業時間和狀態
+        "language": "zh-TW"
+    }
+    
+    status_text = "營業狀態未知"
+    open_now = False
+    opening_hours_list: List[str] = [] # 👈 5. 【新增】
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(detail_url, params=detail_params)
+            res.raise_for_status() # 如果是 4xx 或 5xx 會拋出例外
+            data = res.json().get("result", {})
+        
+        business_status = (data.get("business_status") or "UNKNOWN").upper()
+        open_hours = data.get("opening_hours", {}) # 👈 6. 【新增】
+        weekday_text = open_hours.get("weekday_text", []) # 👈 7. 【新增】
+        opening_hours_list = weekday_text # 👈 8. 【新增】
+        
+        if business_status == "OPERATIONAL":
+            # ( ... 內部的 open_now 和 status_text 邏輯保持不變 ... )
+            # 檢查是否「今天公休」
+            if is_closed_today_by_weekday_text(weekday_text):
+                status_text = "今日公休"
+                open_now = False
+            # 檢查是否「目前營業中」
+            elif open_hours.get("open_now") is not None:
+                open_now = open_hours.get("open_now", False)
+                status_text = weekday_text[datetime.now(pytz.timezone('Asia/Taipei')).weekday()] if weekday_text else "營業中"
+                # 簡化文字
+                if ":" in status_text:
+                    status_text = status_text.split(":", 1)[1].strip()
+            else:
+                # 雖然 OPERATIONAL 但沒有 open_now 資訊
+                status_text = "營業中 (時間未知)"
+                open_now = True # 假設
+        
+        elif business_status == "CLOSED_TEMPORARILY":
+            status_text = "暫停營業"
+        elif business_status == "CLOSED_PERMANENTLY":
+            status_text = "已永久歇業"
+        else:
+            status_text = "營業狀態不明"
+
+    except httpx.HTTPStatusError as e:
+        print(f"Error fetching Google Details: {e}")
+        status_text = f"Google API 錯誤: {e.response.status_code}"
+    except Exception as e:
+        print(f"Error processing Google Details: {e}")
+        status_text = "查詢營業狀態失敗"
+
+    # 👈 9. 【修改】 回傳 opening_hours_list
+    return {"open_now": open_now, "status_text": status_text, "opening_hours": opening_hours_list}
+
+async def _get_open_weather(request: Request, lat: float, lon: float) -> Dict[str, Any]:
+    """
+    (輔助函式) 呼叫 OpenWeatherMap 獲取天氣
+    """
+    weather_key = request.app.state.openweather_api_key
+    if not weather_key:
+        return {"desc": "未設定 Weather API Key", "temp": 0, "pop": 0}
+
+    # 使用 3.0 的 One Call API (如果可用) 或 2.5 的 forecast
+    forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={weather_key}&units=metric&lang=zh_tw"
+    
+    desc = "天氣未知"
+    temp = 0
+    pop = 0 # 降雨機率 (Probability of precipitation)
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(forecast_url)
+            res.raise_for_status()
+            data = res.json()
+        
+        if data.get("list"):
+            # 取得未來 1-3 小時內的天氣預報
+            first_forecast = data["list"][0]
+            weather_data = first_forecast.get("weather", [{}])[0]
+            
+            desc = weather_data.get("description", "無描述")
+            temp = int(round(first_forecast.get("main", {}).get("temp", 0)))
+            pop = int(round(first_forecast.get("pop", 0) * 100)) # pop 是 0-1 的小數
+
+    except httpx.HTTPStatusError as e:
+        print(f"Error fetching OpenWeather: {e}")
+        desc = f"Weather API 錯誤: {e.response.status_code}"
+    except Exception as e:
+        print(f"Error processing OpenWeather: {e}")
+        desc = "查詢天氣失敗"
+
+    return {"desc": desc, "temp": temp, "pop": pop}
+
+
+# --- 🔽🔽 5. 【修改 get_start_info 函式】 🔽🔽 ---
+
+@router.post("/startInfo")  # 👈 這就是 App 正在呼叫的 API
+async def get_start_info(
+    payload: StartInfoRequest,  # 👈 接收 App 傳來的 JSON
+    request: Request
+):
+    """
+    (已實作)
+    獲取景點的即時資訊 (天氣、營業狀態、初步替代方案)
+    """
+    print(f"===== 收到 /startInfo 請求 for placeId: {payload.placeId} =====")
+    
+    # 【真實邏輯】
+    # 1. 同時呼叫 Google 和 OpenWeather
+    try:
+        # 建立兩個協程任務
+        google_task = _get_google_place_details(request, payload.placeId)
+        weather_task = _get_open_weather(request, payload.lat, payload.lng)
+        
+        # 等待兩個任務都完成
+        # results 會是一個 list, 包含 [google_result, weather_result]
+        results = await asyncio.gather(google_task, weather_task)
+        
+        google_result = results[0]
+        weather_result = results[1]
+
+    except Exception as e:
+        # ... (錯誤處理保持不變) ...
+        print(f"[/startInfo] 併發 API 呼叫時發生錯誤: {e}")
+        error_weather = WeatherInfo(description="查詢失敗", temperature=0, rain_chance=0) # 👈 修改
+        error_response = StartInfo(
+            placeId=payload.placeId,
+            weather=error_weather,
+            openNow=False,
+            openStatusText="查詢失敗",
+            openingHours=[] # 👈 修改
+        )
+        return error_response # 👈 FastAPI 會自動轉 JSON
+
+    # 2. 組合回傳資料 (使用 Pydantic 模型)
+    final_weather = WeatherInfo(
+        description=weather_result["desc"],
+        temperature=weather_result["temp"],
+        rain_chance=weather_result["pop"] # 👈 修改
+    )
+    
+    final_response = StartInfo(
+        placeId=payload.placeId,
+        weather=final_weather,
+        openNow=google_result["open_now"],
+        openStatusText=google_result["status_text"],
+        alternatives=[], 
+        page=0,
+        openingHours=google_result["opening_hours"] # 👈 10. 【新增】
+    )
+    
+    # 3. 回傳 (讓 FastAPI 自動處理序列化)
+    # ‼️ 刪除手動組裝的 final_json_payload ‼️
+    # ‼️ 讓 Pydantic 處理 alias (例如 rainChance -> rain_chance) ‼️
+    print(f"===== /startInfo 回傳 (Pydantic 模型): {final_response.model_dump(by_alias=True)} =====")
+    
+    # ‼️ Pydantic v2：使用 model_dump 並指定 by_alias=True
+    # 這會將 { "rainChance": 10 } 轉成 { "rain_chance": 10 } (根據 Field(alias=...))
+    return JSONResponse(content=final_response.model_dump(by_alias=True))
+

@@ -35,3 +35,33 @@ class RecommendGroupRequest(BaseModel):
 class RecommendRequest(BaseModel):
     user_id: str
     form: Dict[str, Any]
+
+from pydantic import BaseModel, Field
+from typing import Optional
+
+# 【 新增 Alternative Pydantic 模型】
+# 這個模型必須對應 Kotlin 的 Alternative data class
+# 我們使用 Field(alias=...) 來接收 Kotlin 傳來的 camelCase (例如 "placeId")
+# 並將它轉換為 Python 的 snake_case (例如 "place_id")
+class Alternative(BaseModel):
+    place_id: str = Field(..., alias="placeId")
+    name: str
+    address: Optional[str] = None
+    rating: Optional[float] = None
+    user_ratings_total: Optional[int] = Field(default=None, alias="userRatingsTotal")
+    lat: float
+    lng: float
+    open_status_text: Optional[str] = Field(default=None, alias="openStatusText")
+    photo_url: Optional[str] = Field(default=None, alias="photoUrl")
+
+    class Config:
+        populate_by_name = True # 允許 Pydantic 透過 alias="placeId" 來填充 place_id
+        
+
+# 【2. 新增 ReplaceActivityRequest Pydantic 模型】
+# 這個模型必須對應 Kotlin 的 ReplaceActivityRequest data class
+# 剛好 Kotlin 傳來的 JSON key (old_activity_id, new_activity_data) 
+# 已經是 snake_case，所以我們可以直接定義
+class ReplaceActivityRequest(BaseModel):
+    old_activity_id: str
+    new_activity_data: Alternative
