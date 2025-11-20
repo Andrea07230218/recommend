@@ -1286,6 +1286,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                         "lat": loc.get("lat"),
                         "lng": loc.get("lng"),
                         "source": "gm_meal",
+                        "photoUrl": det.get("photo_url"),
                     }
                     print(f"🍽️ 選到 {label}：{item['name']} | {item['address']}")
                     selected_places.append(item)
@@ -1373,6 +1374,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                                         "lat": loc2.get("lat"),
                                         "lng": loc2.get("lng"),
                                         "source": "gm_night",
+                                        "photoUrl": det2.get("photo_url"),
                                     }
 
                                     if _is_shopping_like(item2.get("types", [])):
@@ -1401,6 +1403,10 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
 
                     if fallback:
                         loc = (fallback.get("geometry") or {}).get("location") or {}
+
+                        # ✅ 為 fallback 取得完整資訊（包含照片）
+                        fallback_det = get_place_details_cached(fallback["place_id"]) or {}
+
                         item = {
                             "place_id": fallback["place_id"],
                             "name": fallback["name"],
@@ -1415,6 +1421,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                             "lat": loc.get("lat"),
                             "lng": loc.get("lng"),
                             "source": "gm_fallback",
+                            "photoUrl": fallback_det.get("photo_url"),
                         }
                         selected_places.append(item)
                         used_place_ids.add(item["place_id"])
@@ -1569,6 +1576,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                                     "lat": loc.get("lat"),
                                     "lng": loc.get("lng"),
                                     "source": "gm_cafe",
+                                    "photoUrl": det.get("photo_url"),
                                 }
                                 leg_for_cafe = leg
                                 break
@@ -1764,6 +1772,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                             "lng": loc.get("lng"),
                             "source": "gpt+gm",
                             "raw_name": raw_name,
+                            "photoUrl": det.get("photo_url"),
                         }
                         item["_behavior_score"] = score_by_behavior(
                             map_types_to_tags(item.get("types", [])),
@@ -1868,6 +1877,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                                     "lat": loc.get("lat"),
                                     "lng": loc.get("lng"),
                                     "source": "gm_nearby",
+                                    "photoUrl": det.get("photo_url"),
                                 }
                                 item["_behavior_score"] = score_by_behavior(
                                     map_types_to_tags(item.get("types", [])),
@@ -1965,6 +1975,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                                 "lat": loc.get("lat"),
                                 "lng": loc.get("lng"),
                                 "source": "gm_nearby_fill",
+                                "photoUrl": det.get("photo_url"),
                             }
                             selected_places.append(item)
                             used_place_ids.add(pid); used_place_names.add(item["name"]); used_day_place_ids[d_idx].add(pid)

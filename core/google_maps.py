@@ -734,6 +734,26 @@ def search_store_candidates(keyword: str,
     results = annotate_travel_minutes(results, {"lat":center_latlng[0], "lng":center_latlng[1]}, mode)
     return results[:limit]
 
+# 在 get_place_details 函式之前加入（約第 590 行）
+def build_photo_url_from_photos(photos: List[Dict], maxwidth: int = 720) -> Optional[str]:
+    if not photos or not isinstance(photos, list) or len(photos) == 0:
+        return None
+    
+    try:
+        # Places API (New) 格式
+        photo_name = photos[0].get("name")
+        if photo_name:
+            return f"https://places.googleapis.com/v1/{photo_name}/media?maxWidthPx={maxwidth}&key={GOOGLE_API_KEY}"
+        
+        # Legacy API fallback
+        photo_ref = photos[0].get("photo_reference")
+        if photo_ref:
+            return f"https://maps.googleapis.com/maps/api/place/photo?maxwidth={maxwidth}&photo_reference={photo_ref}&key={GOOGLE_API_KEY}"
+    except (IndexError, AttributeError, TypeError):
+        return None
+    
+    return None
+
 def get_place_details(place_id: str) -> Dict[str, Any]:
     url = f"{PLACES_V1_BASE}/places/{place_id}"
     params = {"languageCode": "zh-TW"}
@@ -743,7 +763,14 @@ def get_place_details(place_id: str) -> Dict[str, Any]:
         if r.status_code != 200:
             print(f"❌ Place Details(New) HTTP {r.status_code} place_id={place_id}")
             return {}
-        return _map_places_v1_to_legacy(r.json())
+        
+        result = _map_places_v1_to_legacy(r.json())
+        
+        # ✅ 新增：自動生成第一張照片的 URL
+        if result.get("photos"):
+            result["photo_url"] = build_photo_url_from_photos(result["photos"])
+        
+        return result
     except Exception as e:
         print(f"❌ Place Details(New) 失敗 place_id={place_id} err={e}")
         return {}
