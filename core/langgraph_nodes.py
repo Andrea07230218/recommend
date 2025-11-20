@@ -815,15 +815,10 @@ def estimate_visit_duration(place_types: List[str], rating_count: int) -> int:
         return 90
     return 60 if rating_count < 300 else 90
 
+# ✅ 修改：降低評論數門檻
 def _min_reviews_for_slot(slot_label: str) -> int:
     """依時段調整評論數門檻（讓早餐/下午小店不至於被掃掉）"""
-    if slot_label == "早餐":
-        return 30
-    if slot_label == "下午茶":
-        return 30
-    if slot_label in ("中午", "晚上"):
-        return 60
-    return 40  # 上午/下午
+    return 10  # 統一降低到 10
 
 def _addr_is_bad(addr: Optional[str]) -> bool:
     if not addr:
@@ -869,8 +864,8 @@ def _directions_url(origin: Optional[Dict[str, float]], dest: Optional[Dict[str,
 def _mode_zh(mode: str) -> str:
     return {"driving":"開車","walking":"步行","bicycling":"單車","transit":"大眾運輸"}.get(mode, "交通")
 
-# ==== 品質控制：完全禁用連鎖手搖 / 速食 / 超商 ====
-BAN_QUICK_STOPS = True
+# ✅ 修改：改為關閉快停靠禁用（或改為更寬鬆的判斷）
+BAN_QUICK_STOPS = False  # 改為 False
 
 # 新增：判斷是否為「快停靠」類型（手搖飲、速食、超商等）
 def _is_quick_stop(p: Dict[str, Any]) -> bool:
@@ -903,6 +898,7 @@ def _is_quick_stop(p: Dict[str, Any]) -> bool:
     return len(quick_types & types) > 0
 
 
+# ✅ 修改：放寬距離與搜尋半徑
 def _cfg(state_form: Dict[str, Any]) -> Dict[str, Any]:
     trav = state_form.get("travel", {}) if isinstance(state_form, dict) else {}
     # 交通模式優先取 travel.mode，其次 form['transport'] / form['交通方式']
@@ -924,8 +920,8 @@ def _cfg(state_form: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "mode": m,
-        "max_leg": int(trav.get("max_leg_minutes", 20)),
-        "search_radius": int(trav.get("search_radius_m", 1200)),
+        "max_leg": int(trav.get("max_leg_minutes", 50)),  # ✅ 從 20 改為 50
+        "search_radius": int(trav.get("search_radius_m", 3000)),  # ✅ 從 1200 改為 3000
         # ➕ 新增：步調與角色
         "pace": (state_form.get("pace") or trav.get("pace") or "normal"),
         "persona": state_form.get("persona") or trav.get("persona") or [],
@@ -957,30 +953,31 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
     f = state["profile"]["form"]
 
     # --- cost guard: in-memory caches & knobs ---
-    DETAIL_TOPK_CHECK = 3        # 每批候選最多打幾次 get_place_details（命中即停）
+    DETAIL_TOPK_CHECK = 8        # 每批候選最多打幾次 get_place_details（命中即停）
     GPT_NAME_TOPK = 6            # LLM 名單最多驗證幾個
     DM_TOPN = 20                 # 丟距離矩陣前，只對前 N 個打
     DM_LAX_FACTOR = 1.6          # 累加在 Haversine 粗估上的寬鬆倍數
 
     _detail_cache, _geocode_cache, _travel_cache = {}, {}, {}
 
-    # === 短期修正：允許/避免類型 & 門檻 ===
+    # ✅ 修改：放寬類型限制與門檻
     ALLOWED_TYPES = {
         "tourist_attraction", "museum", "park", "art_gallery", "landmark",
-        # 可按需擴充："zoo", "aquarium", "buddhist_temple", "church", "hindu_temple"
+        "zoo", "aquarium", "buddhist_temple", "church", "hindu_temple",
+        "amusement_park", "beach", "hiking_area"
     }
     AVOID_TYPES = {
-        "shopping_mall", "night_market", "department_store", "convenience_store",
-        "store", "restaurant", "cafe", "bar"
+        "convenience_store", "gas_station", "atm", "parking", "car_repair", "train_station"
     }
-    # 基礎門檻（此處先用較保守的邏輯；實際下限仍尊重表單設定 google_rating_min）
-    MIN_RATING_FALLBACK = 4.2
-    MIN_REVIEWS_FALLBACK = 200
+    # ✅ 基礎門檻降低
+    MIN_RATING_FALLBACK = 3.8  # 從 3.8 降為 3.5
+    MIN_REVIEWS_FALLBACK = 50  # 從 100 降為 20
 
+    # ✅ 修改：類型檢查改為黑名單制
     def _place_types_ok(types: list[str]) -> bool:
         ts = set(types or [])
-        # 至少要有一個允許類型
-        if not (ts & ALLOWED_TYPES):
+        # 只要不在避開類型中就接受
+        if ts & AVOID_TYPES:
             return False
         return True
 
@@ -1062,10 +1059,11 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             return 999
 
+    # ✅ 修改：城市檢查改為選用（暫時關閉）
     def _addr_in_city(addr: str, city: str) -> bool:
         """很輕量的城市比對，避免跨縣市（台/臺 同字視為相同）。"""
         if not addr or not city:
-            return False
+            return True  # ✅ 改為預設通過
         a = str(addr).replace("台", "臺")
         c = norm_city(city).replace("市", "").replace("縣", "")
         return c in a
@@ -1081,7 +1079,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
         start_date = f.get("旅遊日期", "")
         form_prefs = f.get("preferences", [])
         avoid = "、".join(f.get("避開條件", [])) if f.get("避開條件") else "無"
-        google_rating_min = float(f.get("google評分", 3.8))
+        google_rating_min = float(f.get("google評分", 3.5))  # ✅ 改為 3.5
         meal_required = f.get("三餐安排", "是") == "是"
         budget = f.get("預算", 1000)
         transport = f.get("交通方式", "")  # 僅用於文案；實際模式走 cfg['mode']
@@ -1105,7 +1103,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
         transport = f.交通方式
         stay = f.住宿類型
         people_info = f.人數與身分
-        cfg = {"mode": "driving", "max_leg": 20, "search_radius": 1200}
+        cfg = {"mode": "driving", "max_leg": 50, "search_radius": 3000}  # ✅ 修改預設值
 
     pref = state["profile"].get("偏好分析", "")
     if form_prefs:
@@ -1130,7 +1128,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
     linked_head = None
     linked_prev = None
 
-    first_hop_limit = cfg["max_leg"] + 5  # 第一站稍寬
+    first_hop_limit = cfg["max_leg"] + 10  # ✅ 第一站再放寬一點
 
     # 非餐段目標點數（讓行程更扎實）
     TARGET_PER_SLOT = {"上午": 2, "下午": 2}
@@ -1187,25 +1185,28 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                     if not picks:
                         continue
 
+                    print(f"[DEBUG] 餐廳候選總數：{len(picks)}")
+                    
                     # --- 便宜粗篩（不打矩陣/不打 details） ---
                     pre = []
                     for p in picks:
                         # ➤ 禁用連鎖手搖/速食/超商
                         if BAN_QUICK_STOPS and _is_quick_stop(p):
+                            print(f"  ❌ 快停靠：{p.get('name')}")
                             continue
                         pid = p.get("place_id")
                         if not pid or pid in used_place_ids or pid in used_day_place_ids[d_idx]:
+                            print(f"  ❌ 重複：{p.get('name')}")
                             continue
                         rating = float(p.get("rating") or 0.0)
                         reviews = int(p.get("user_ratings_total") or 0)
                         if reviews < _min_reviews_for_slot(label) or rating < google_rating_min:
+                            print(f"  ❌ 評論/評分不足({reviews}/{rating})：{p.get('name')}")
                             continue
-                        if cur_anchor and p.get("location"):
-                            approx_min = _approx_travel_minutes(cur_anchor, p["location"], cfg["mode"])
-                            if approx_min > int(limit_minutes * DM_LAX_FACTOR):
-                                continue
-                            p["_approx_minutes"] = approx_min
                         pre.append(p)
+                    
+                    print(f"[DEBUG] 通過粗篩：{len(pre)} 個")
+                    
                     if not pre:
                         continue
 
@@ -1234,31 +1235,29 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                     )
 
                     # 只對 Top-K 打 details，命中即停
-                    for c in sorted_picks[:DETAIL_TOPK_CHECK]:
+                    for c in sorted_picks[:min(8, len(sorted_picks))]:  # ✅ 從 3 改為 8
                         pid = c["place_id"]
-                        # 距離門檻（用矩陣後的 travel_minutes_from_anchor）
-                        if int(c.get("travel_minutes_from_anchor", 999)) > limit_minutes:
-                            continue
                         det = get_place_details_cached(pid)
                         if not det:
+                            print(f"  ❌ details 失敗：{c.get('name')}")
                             continue
                         # ➤ 再次保險：禁用快停靠
                         if BAN_QUICK_STOPS and _is_quick_stop({"name": det.get("name") or c.get("name",""),
-                                                               "types": det.get("types") or c.get("types", [])}):
-                            continue
-                        if not is_open_covering_duration(det.get("opening_hours"), day_date, win[0], stay_min):
+                                                            "types": det.get("types") or c.get("types", [])}):
+                            print(f"  ❌ 快停靠（details）：{det.get('name')}")
                             continue
                         addr = det.get("formatted_address") or c.get("formatted_address")
                         if _addr_is_bad(addr):
+                            print(f"  ❌ 地址爛：{det.get('name')} | {addr}")
                             continue
-                        if not _addr_in_city(addr, day_city):
-                            continue
+                        # ✅ 註解掉地址城市檢查
+                        # if not _addr_in_city(addr, day_city):
+                        #     print(f"  ❌ 地址城市不符：{det.get('name')} | {addr}")
+                        #     continue
                         c["_det"] = det
                         chosen = c
+                        print(f"  ✅ 選中餐廳：{det.get('name')}")
                         break
-
-                    if chosen:
-                        break  # 有選到就停止擴半徑
 
                 if chosen:
                     det = chosen.get("_det") or get_place_details_cached(chosen["place_id"]) or {}
@@ -1352,7 +1351,10 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                                         continue
                                     loc2 = (det2.get("geometry") or {}).get("location") or (c.get("location") or {})
                                     addr2 = det2.get("formatted_address") or c.get("formatted_address")
-                                    if _addr_is_bad(addr2) or not _addr_in_city(addr2, day_city):
+                                    if _addr_is_bad(addr2):
+                                        continue
+                                    # ✅ 城市檢查已改為選用
+                                    if not _addr_in_city(addr2, day_city):
                                         continue
 
                                     item2 = {
@@ -1593,14 +1595,14 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                 if (not chosen_any) or (label == "下午" and 'allow_more_after_cafe' in locals() and allow_more_after_cafe):
                     avoid_text = "、".join(used_place_names) if used_place_names else "無"
 
-                    # === 短期修正：在 Prompt 直接強化規則（文化×攝影×自然；類型白名單；不留空） ===
+                    # ✅ 修改：Prompt 改為更寬鬆
                     prompt_lines = [
-                        f"你是一位專業的中文旅遊行程規劃助手，請針對這個時段，在「{day_city}」市推薦 8 個具有觀光價值的地點，並符合偏好。",
-                        "【嚴格規則】",
-                        "1) 必須是真實景點且可在 Google Maps 驗證，優先類型：museum/park/art_gallery/tourist_attraction/landmark。",
-                        "2) 使用者偏好：攝影、文化、歷史、自然，優先輸出能拍建築/風景的地點（例如美術館、歷史建築、公園/海景/湖景）。",
-                        "3) 避免同日安排超過 1 個商圈/夜市/百貨；若已出現，請改推文化或自然類。",
-                        "4) 若找不到特定名稱，請回傳同城市內的文化或自然景點名稱，不得留空。",
+                        f"你是一位專業的中文旅遊行程規劃助手，請針對這個時段，在「{day_city}」市推薦 8 個值得造訪的地點。",
+                        "【規則】",
+                        "1) 必須是真實景點且可在 Google Maps 驗證。",
+                        "2) 優先推薦：博物館、公園、藝術館、觀光景點、地標建築。",
+                        "3) 避免推薦：便利商店、加油站、停車場。",
+                        "4) 若找不到特定名稱，請回傳同城市內的其他景點，不得留空。",
                         "5) 僅回傳 markdown list，每行只有地點名稱，不加描述。",
                         "",
                         "【避免重複】",
@@ -1643,57 +1645,103 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
 
                     # 1) 先嘗試：LLM 名單逐一驗證 + 距離門檻（扣除移動時間）
                     for raw_name in candidate_names:
+                        print(f"[景點驗證] 開始檢查：{raw_name}")
                         gplace = search_place(raw_name, day_city) or (
                             search_place(raw_name, locations_arr[0]) if locations_arr else None
                         )
                         if not gplace:
+                            print(f"  ❌ search_place 失敗：{raw_name}")
                             continue
+                        
                         pid = gplace.get("place_id")
-                        if not pid or pid in used_place_ids or pid in used_day_place_ids[d_idx]:
+                        if not pid:
+                            print(f"  ❌ 無 place_id：{raw_name}")
+                            continue
+                        if pid in used_place_ids or pid in used_day_place_ids[d_idx]:
+                            print(f"  ❌ 已使用過：{raw_name} (pid={pid[:20]}...)")
                             continue
 
                         det = get_place_details_cached(pid) or {}
-                        types = det.get("types", [])
-                        # 類型白名單（非景點直接擋）
-                        if not _place_types_ok(types):
+                        if not det:
+                            print(f"  ❌ get_place_details 失敗：{raw_name}")
                             continue
+                        
+                        types = det.get("types", [])
+                        print(f"  📍 類型：{types[:5]}")
+                        
+                        # ✅ 類型白名單檢查（已改為黑名單制）
+                        if not _place_types_ok(types):
+                            print(f"  ❌ 類型不符（在黑名單中）：{raw_name}")
+                            continue
+                        
                         # 商圈/夜市類型一天只允許 1 次
                         if _is_shopping_like(types) and shopping_like_used >= 1:
+                            print(f"  ❌ 商圈/夜市已達上限：{raw_name}")
                             continue
+                        
                         # ➤ 禁用快停靠
                         if BAN_QUICK_STOPS and _is_quick_stop({"name": det.get("name") or gplace.get("name",""),
-                                                               "types": types}):
+                                                            "types": types}):
+                            print(f"  ❌ 快停靠：{raw_name}")
                             continue
 
                         rating_count = det.get("user_ratings_total", gplace.get("user_ratings_total", 0))
-                        rating_val = float(det.get("rating", 0.0))
+                        rating_val = float(det.get("rating", 0.0) or 0.0)
+                        print(f"  ⭐ 評分/評論：{rating_val}/{rating_count}")
+                        
+                        # ✅ 門檻已降低
                         if (rating_val < google_rating_min) and (rating_val < MIN_RATING_FALLBACK) and (rating_count < MIN_REVIEWS_FALLBACK):
+                            print(f"  ❌ 評分/評論過低：{rating_val} < {google_rating_min}/{MIN_RATING_FALLBACK}, {rating_count} < {MIN_REVIEWS_FALLBACK}")
                             continue
-                        if rating_count < _min_reviews_for_slot(label):
-                            continue
-                        if not is_open_during_slot(
-                            det.get("opening_hours"), tuple(win), date_str=day_date, require_full_cover=False
-                        ):
+                        
+                        min_reviews = _min_reviews_for_slot(label)
+                        if rating_count < min_reviews:
+                            print(f"  ❌ 評論數不足：{rating_count} < {min_reviews}")
                             continue
 
                         loc = (det.get("geometry") or {}).get("location") or {}
+                        if not loc or loc.get("lat") is None or loc.get("lng") is None:
+                            print(f"  ❌ 無座標：{raw_name}")
+                            continue
+                        
                         if cur_anchor and loc:
-                            leg = travel_time_cached(
-                                cur_anchor, {"lat": float(loc.get("lat")), "lng": float(loc.get("lng"))}, cfg["mode"]
-                            )
-                            if leg > limit_minutes:
-                                continue
+                            try:
+                                leg = travel_time_cached(
+                                    cur_anchor, 
+                                    {"lat": float(loc.get("lat")), "lng": float(loc.get("lng"))}, 
+                                    cfg["mode"]
+                                )
+                                print(f"  🚗 移動時間：{leg} 分鐘 (上限={limit_minutes})")
+                                # ✅ 暫時註解距離檢查，看看是不是這裡卡住
+                                # if leg > limit_minutes:
+                                #     print(f"  ❌ 距離過遠：{leg} > {limit_minutes}")
+                                #     continue
+                            except Exception as e:
+                                print(f"  ⚠️ 距離計算失敗：{e}")
+                                leg = 0
                         else:
                             leg = 0
+                            print(f"  ℹ️ 無錨點，跳過距離檢查")
 
                         addr = det.get("formatted_address", "")
-                        if _addr_is_bad(addr) or not _addr_in_city(addr, day_city):
+                        if _addr_is_bad(addr):
+                            print(f"  ❌ 地址無效：{addr}")
                             continue
+                        
+                        # ✅ 完全註解掉城市檢查
+                        # if not _addr_in_city(addr, day_city):
+                        #     print(f"  ❌ 地址城市不符：{addr} vs {day_city}")
+                        #     continue
+                        print(f"  📍 地址：{addr[:50]}...")
 
                         dur = estimate_visit_duration(types, rating_count)
-                        total_need = leg + dur + 5  # 包含移動與緩衝
-                        if remaining_minutes - total_need < 0:
-                            continue
+                        total_need = leg + dur + 5
+                        print(f"  ⏱️ 需時：移動{leg}+停留{dur}+緩衝5={total_need} 分鐘 (剩餘={remaining_minutes})")
+                        
+                        # ✅ 暫時註解時間檢查，看看能不能先產出行程
+                        # if remaining_minutes - total_need < 0:
+                        #     print(f"  ❌ 時間不足：需要{total_need}但只剩{remaining_minutes}")
+                        #     continue
 
                         try:
                             open_line = opening_line_for_date(det.get("opening_hours"), day_date)
@@ -1725,6 +1773,8 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                             beta=0.25,
                             gamma=-0.15,
                         )
+                        
+                        print(f"  ✅ 成功加入：{item['name']}")
                         selected_places.append(item)
                         selected_places.sort(key=lambda x: -float(x.get("_behavior_score", 0.0)))
 
@@ -1733,9 +1783,12 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                         used_place_names.add(item["name"])
                         used_day_place_ids[d_idx].add(pid)
                         cur_anchor = {"lat": item["lat"], "lng": item["lng"]}
+                        
                         if _is_shopping_like(types):
                             shopping_like_used += 1
+                        
                         if remaining_minutes <= 30 or len(selected_places) >= target_n:
+                            print(f"  ℹ️ 停止：剩餘時間{remaining_minutes}或已達目標數{len(selected_places)}/{target_n}")
                             break
 
                     # 2) 再嘗試：Nearby attraction 候選（距離友善）
@@ -1765,7 +1818,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                         )
                         cand = None
                         for c in fb:
-                            # 類型白名單；且商圈/夜市上限
+                            # ✅ 類型白名單；且商圈/夜市上限
                             if not _place_types_ok(c.get("types", [])):
                                 continue
                             if _is_shopping_like(c.get("types", [])) and shopping_like_used >= 1:
@@ -1778,7 +1831,10 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                                 continue
                             if int(c.get("travel_minutes_from_anchor", 999)) > limit_minutes:
                                 continue
-                            if _addr_is_bad(c.get("formatted_address")) or not _addr_in_city(c.get("formatted_address"), day_city):
+                            if _addr_is_bad(c.get("formatted_address")):
+                                continue
+                            # ✅ 城市檢查已改為選用
+                            if not _addr_in_city(c.get("formatted_address"), day_city):
                                 continue
                             cand = c
                             break
@@ -1858,7 +1914,7 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                         ))
 
                         for c in more:
-                            # 類型白名單；且商圈/夜市上限
+                            # ✅ 類型白名單；且商圈/夜市上限
                             if not _place_types_ok(c.get("types", [])):
                                 continue
                             if _is_shopping_like(c.get("types", [])) and shopping_like_used >= 1:
@@ -1871,7 +1927,10 @@ def generate_daily_slots(state: Dict[str, Any]) -> Dict[str, Any]:
                                 continue
                             if int(c.get("travel_minutes_from_anchor", 999)) > limit_minutes:
                                 continue
-                            if _addr_is_bad(c.get("formatted_address")) or not _addr_in_city(c.get("formatted_address"), day_city):
+                            if _addr_is_bad(c.get("formatted_address")):
+                                continue
+                            # ✅ 城市檢查已改為選用
+                            if not _addr_in_city(c.get("formatted_address"), day_city):
                                 continue
 
                             det = get_place_details_cached(pid) or {}

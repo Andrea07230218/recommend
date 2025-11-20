@@ -1124,7 +1124,8 @@ async def recommend_alternative(request: Request):
     seen_names_for_prompt: Set[str] = set(hist_ex_names)
 
     for round_idx, radius_m in enumerate(RADIUS_STEPS_M, start=1):
-        if len(collected) >= 3:
+        # ✅ 修正：改成根據前端要求的數量 (max_results) 來決定何時停止
+        if len(collected) >= data.get("max_results", 10): 
             break
 
         exclude_list_for_prompt = ", ".join(sorted({n for n in seen_names_for_prompt if n})) or "（無）"
@@ -1223,10 +1224,17 @@ async def recommend_alternative(request: Request):
             seen_pid_final.add(pid)
         unique_sorted.append(c)
 
-    # 8. 保證至少三筆（最後備援 25km）
-    top = unique_sorted[:3]
-    if len(top) < 3:
-        print(f"[流程] 排序後僅 {len(top)} 筆，進行最後補齊流程...")
+    # 8. 根據前端請求數量回傳 (如果沒傳 max_results 則預設 10)
+    # ⚠️ 注意：這裡我們直接取 data (request json) 裡的 max_results
+    target_count = data.get("max_results", 10)
+    
+    # 先取前 N 筆
+    top = unique_sorted[:target_count]
+    
+    # 如果數量不足 target_count (且還沒達到 Google API 的物理極限)，嘗試備援
+    # 這裡我們設定一個合理的備援觸發門檻，例如如果連 3 筆都不到，或是使用者要求更多但我們不夠
+    if len(top) < target_count and len(top) < 20: 
+        print(f"[流程] 排序後僅 {len(top)} 筆 (目標 {target_count})，進行最後補齊流程...")
         final_backup = await backup_search_candidates(
             request,
             center_lat=spot_lat, center_lon=spot_lon,
@@ -1237,15 +1245,21 @@ async def recommend_alternative(request: Request):
             activity_time=pref_res['activity_time'],
             exclude_ids=hist_ex_ids, exclude_names=hist_ex_names,
             run_seen_ids=run_seen_ids, run_seen_names=run_seen_names,
-            radius_m=25000
+            radius_m=25000 # 擴大半徑到 25km 找最後機會
         )
+        
         if final_backup:
+            # 合併原有結果與備援結果
             merged = unique_sorted + final_backup
+            
+            # 重新排序 (分數高 -> 距離近 -> 評分高)
             merged.sort(key=lambda x: (
                 -(x.get("score", 0)),
                 (x.get("distance", float('inf')) if x.get("distance") is not None else float('inf')),
                 -(x.get("rating", 0) or 0)
             ))
+            
+            # 重新去重
             uniq2, spid2, sname2 = [], set(), set()
             for c in merged:
                 pid = str(c.get("place_id") or "")
@@ -1257,8 +1271,10 @@ async def recommend_alternative(request: Request):
                 sname2.add(nm)
                 if pid: spid2.add(pid)
                 uniq2.append(c)
-            top = uniq2[:3]
-
+            
+            # ✅ 修正：截取到 target_count (不再是 3)
+            top = uniq2[:target_count]
+            
     # 9. 補照片與今日營業字串
     try:
         google_api_key = request.app.state.google_api_key
@@ -1287,39 +1303,71 @@ async def _get_google_place_details(request: Request, place_id: str) -> Dict[str
     """
     (輔助函式) 呼叫 Google Places Details API 獲取營業狀態
     """
+    print(f"\n=== _get_google_place_details 開始 ===")
+    print(f"Place ID: {place_id}")
+    
     google_api_key = request.app.state.google_api_key
     if not google_api_key:
-        return {"open_now": False, "status_text": "未設定 Google API Key", "opening_hours": []} # 👈 修改
+        print("[ERROR] Google API Key 未設定")
+        return {"open_now": False, "status_text": "未設定 Google API Key", "opening_hours": []}
+    
+    print(f"Google API Key (前10碼): {google_api_key[:10]}...")
 
     detail_url = "https://maps.googleapis.com/maps/api/place/details/json"
     detail_params = {
         "place_id": place_id,
         "key": google_api_key,
-        "fields": "opening_hours,business_status", # 只需要營業時間和狀態
+        "fields": "opening_hours,business_status",
         "language": "zh-TW"
     }
     
+    print(f"請求 URL: {detail_url}")
+    print(f"請求參數: place_id={place_id}, fields=opening_hours,business_status")
+    
     status_text = "營業狀態未知"
     open_now = False
-    opening_hours_list: List[str] = [] # 👈 5. 【新增】
+    opening_hours_list: List[str] = []
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             res = await client.get(detail_url, params=detail_params)
-            res.raise_for_status() # 如果是 4xx 或 5xx 會拋出例外
-            data = res.json().get("result", {})
+            
+            print(f"Google API 回應狀態碼: {res.status_code}")
+            print(f"Google API 回應內容 (前 300 字): {res.text[:300]}")
+            
+            res.raise_for_status()
+            full_data = res.json()
+            
+            print(f"Google API 回應 status: {full_data.get('status')}")
+            
+            # 檢查 Google API 的 status
+            if full_data.get("status") != "OK":
+                error_msg = full_data.get("error_message", "未知錯誤")
+                print(f"[ERROR] Google API 回傳非 OK 狀態: {full_data.get('status')}")
+                print(f"[ERROR] 錯誤訊息: {error_msg}")
+                return {
+                    "open_now": False, 
+                    "status_text": f"Google API 錯誤: {full_data.get('status')} - {error_msg}", 
+                    "opening_hours": []
+                }
+            
+            data = full_data.get("result", {})
+            print(f"result 物件內容: {data}")
         
         business_status = (data.get("business_status") or "UNKNOWN").upper()
-        open_hours = data.get("opening_hours", {}) # 👈 6. 【新增】
-        weekday_text = open_hours.get("weekday_text", []) # 👈 7. 【新增】
-        opening_hours_list = weekday_text # 👈 8. 【新增】
+        open_hours = data.get("opening_hours", {})
+        weekday_text = open_hours.get("weekday_text", [])
+        opening_hours_list = weekday_text
+        
+        print(f"business_status: {business_status}")
+        print(f"weekday_text 數量: {len(weekday_text)}")
         
         if business_status == "OPERATIONAL":
-            # ( ... 內部的 open_now 和 status_text 邏輯保持不變 ... )
             # 檢查是否「今天公休」
             if is_closed_today_by_weekday_text(weekday_text):
                 status_text = "今日公休"
                 open_now = False
+                print(f"判斷結果: 今日公休")
             # 檢查是否「目前營業中」
             elif open_hours.get("open_now") is not None:
                 open_now = open_hours.get("open_now", False)
@@ -1327,27 +1375,36 @@ async def _get_google_place_details(request: Request, place_id: str) -> Dict[str
                 # 簡化文字
                 if ":" in status_text:
                     status_text = status_text.split(":", 1)[1].strip()
+                print(f"判斷結果: open_now={open_now}, status_text={status_text}")
             else:
                 # 雖然 OPERATIONAL 但沒有 open_now 資訊
                 status_text = "營業中 (時間未知)"
-                open_now = True # 假設
+                open_now = True
+                print(f"判斷結果: 營業中但無時間資訊")
         
         elif business_status == "CLOSED_TEMPORARILY":
             status_text = "暫停營業"
+            print(f"判斷結果: 暫停營業")
         elif business_status == "CLOSED_PERMANENTLY":
             status_text = "已永久歇業"
+            print(f"判斷結果: 永久歇業")
         else:
             status_text = "營業狀態不明"
+            print(f"判斷結果: 狀態不明 (business_status={business_status})")
 
     except httpx.HTTPStatusError as e:
-        print(f"Error fetching Google Details: {e}")
+        print(f"[ERROR] HTTP 錯誤: {e.response.status_code}")
+        print(f"[ERROR] 回應內容: {e.response.text}")
         status_text = f"Google API 錯誤: {e.response.status_code}"
     except Exception as e:
-        print(f"Error processing Google Details: {e}")
+        print(f"[ERROR] 未知錯誤: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         status_text = "查詢營業狀態失敗"
 
-    # 👈 9. 【修改】 回傳 opening_hours_list
-    return {"open_now": open_now, "status_text": status_text, "opening_hours": opening_hours_list}
+    result = {"open_now": open_now, "status_text": status_text, "opening_hours": opening_hours_list}
+    print(f"=== _get_google_place_details 結束，回傳: {result} ===\n")
+    return result
 
 async def _get_open_weather(request: Request, lat: float, lon: float) -> Dict[str, Any]:
     """
@@ -1390,68 +1447,238 @@ async def _get_open_weather(request: Request, lat: float, lon: float) -> Dict[st
 
 
 # --- 🔽🔽 5. 【修改 get_start_info 函式】 🔽🔽 ---
-
-@router.post("/startInfo")  # 👈 這就是 App 正在呼叫的 API
+@router.post("/startInfo")
 async def get_start_info(
-    payload: StartInfoRequest,  # 👈 接收 App 傳來的 JSON
+    payload: StartInfoRequest,
     request: Request
 ):
-    """
-    (已實作)
-    獲取景點的即時資訊 (天氣、營業狀態、初步替代方案)
-    """
     print(f"===== 收到 /startInfo 請求 for placeId: {payload.placeId} =====")
     
-    # 【真實邏輯】
-    # 1. 同時呼叫 Google 和 OpenWeather
     try:
-        # 建立兩個協程任務
         google_task = _get_google_place_details(request, payload.placeId)
         weather_task = _get_open_weather(request, payload.lat, payload.lng)
         
-        # 等待兩個任務都完成
-        # results 會是一個 list, 包含 [google_result, weather_result]
         results = await asyncio.gather(google_task, weather_task)
         
         google_result = results[0]
         weather_result = results[1]
+        
+        # 如果 Place ID 失效，嘗試用座標搜尋
+        if "NOT_FOUND" in google_result.get("status_text", ""):
+            print(f"[WARNING] Place ID 失效，嘗試用座標搜尋替代方案")
+            # 這裡可以呼叫 Nearby Search 來找最近的景點
+            # 或者只回傳天氣資訊，讓前端處理
 
     except Exception as e:
-        # ... (錯誤處理保持不變) ...
         print(f"[/startInfo] 併發 API 呼叫時發生錯誤: {e}")
-        error_weather = WeatherInfo(description="查詢失敗", temperature=0, rain_chance=0) # 👈 修改
+        import traceback
+        traceback.print_exc()
+        
+        error_weather = WeatherInfo(
+            summary="查詢失敗",
+            temperatureC=0,
+            rainProbability=None
+        )
         error_response = StartInfo(
             placeId=payload.placeId,
             weather=error_weather,
             openNow=False,
             openStatusText="查詢失敗",
-            openingHours=[] # 👈 修改
+            openingHours=[]
         )
-        return error_response # 👈 FastAPI 會自動轉 JSON
+        return JSONResponse(content=error_response.model_dump(by_alias=True))
 
     # 2. 組合回傳資料 (使用 Pydantic 模型)
-    final_weather = WeatherInfo(
-        description=weather_result["desc"],
-        temperature=weather_result["temp"],
-        rain_chance=weather_result["pop"] # 👈 修改
-    )
-    
-    final_response = StartInfo(
-        placeId=payload.placeId,
-        weather=final_weather,
-        openNow=google_result["open_now"],
-        openStatusText=google_result["status_text"],
-        alternatives=[], 
-        page=0,
-        openingHours=google_result["opening_hours"] # 👈 10. 【新增】
-    )
-    
-    # 3. 回傳 (讓 FastAPI 自動處理序列化)
-    # ‼️ 刪除手動組裝的 final_json_payload ‼️
-    # ‼️ 讓 Pydantic 處理 alias (例如 rainChance -> rain_chance) ‼️
-    print(f"===== /startInfo 回傳 (Pydantic 模型): {final_response.model_dump(by_alias=True)} =====")
-    
-    # ‼️ Pydantic v2：使用 model_dump 並指定 by_alias=True
-    # 這會將 { "rainChance": 10 } 轉成 { "rain_chance": 10 } (根據 Field(alias=...))
-    return JSONResponse(content=final_response.model_dump(by_alias=True))
+    try:
+        final_weather = WeatherInfo(
+            summary=weather_result.get("desc", "未知"),
+            temperatureC=int(weather_result.get("temp", 0)),
+            rainProbability=int(weather_result.get("pop", 0)) if weather_result.get("pop") is not None else None
+        )
+        
+        final_response = StartInfo(
+            placeId=payload.placeId,
+            weather=final_weather,
+            openNow=google_result.get("open_now", False),
+            openStatusText=google_result.get("status_text", "營業狀態未知"),
+            alternatives=[], 
+            page=0,
+            openingHours=google_result.get("opening_hours", [])
+        )
+        
+        print(f"===== /startInfo 回傳: {final_response.model_dump(by_alias=True)} =====")
+        
+        return JSONResponse(content=final_response.model_dump(by_alias=True))
+        
+    except Exception as e:
+        print(f"[/startInfo] 組合回應時發生錯誤: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        error_weather = WeatherInfo(
+            summary="資料格式錯誤",
+            temperatureC=0,
+            rainProbability=None
+        )
+        error_response = StartInfo(
+            placeId=payload.placeId,
+            weather=error_weather,
+            openNow=False,
+            openStatusText="資料處理失敗",
+            openingHours=[]
+        )
+        return JSONResponse(content=error_response.model_dump(by_alias=True))
 
+@router.get("/test-openweather")
+async def test_openweather_connection(request: Request):
+    """測試 OpenWeather API 連接"""
+    api_key = request.app.state.openweather_api_key
+    
+    print(f"\n=== 測試 OpenWeather API ===")
+    print(f"API Key (前10碼): {api_key[:10]}...")
+    print(f"API Key 長度: {len(api_key)}")
+    
+    if not api_key:
+        return {"status": "ERROR", "message": "OpenWeather API Key 未設定"}
+    
+    if len(api_key) != 32:
+        return {"status": "ERROR", "message": f"API Key 長度錯誤: {len(api_key)} (應為 32)"}
+    
+    # 測試台北天氣
+    test_lat, test_lon = 25.0330, 121.5654
+    test_url = f"https://api.openweathermap.org/data/2.5/weather?lat={test_lat}&lon={test_lon}&appid={api_key}&units=metric&lang=zh_tw"
+    
+    print(f"請求 URL: {test_url[:80]}...")
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.get(test_url)
+            
+            print(f"回應狀態碼: {res.status_code}")
+            
+            if res.status_code == 401:
+                print(f"錯誤回應: {res.text}")
+                return {
+                    "status": "ERROR", 
+                    "message": "API Key 無效 (401 Unauthorized)",
+                    "response": res.text
+                }
+            
+            if res.status_code == 429:
+                print(f"錯誤回應: {res.text}")
+                return {
+                    "status": "ERROR", 
+                    "message": "API 呼叫次數超過限制 (429 Too Many Requests)",
+                    "response": res.text
+                }
+            
+            res.raise_for_status()
+            data = res.json()
+            
+            print(f"成功取得天氣資料: {data.get('weather', [{}])[0].get('description')}")
+            
+            return {
+                "status": "SUCCESS",
+                "message": "✅ OpenWeather API 連接正常",
+                "api_key_prefix": api_key[:10] + "...",
+                "test_location": "台北 (25.0330, 121.5654)",
+                "temperature": data.get("main", {}).get("temp"),
+                "feels_like": data.get("main", {}).get("feels_like"),
+                "description": data.get("weather", [{}])[0].get("description"),
+                "humidity": data.get("main", {}).get("humidity"),
+                "wind_speed": data.get("wind", {}).get("speed"),
+                "raw_response": data
+            }
+            
+    except httpx.TimeoutException:
+        print("錯誤: 連接超時")
+        return {"status": "ERROR", "message": "連接超時 (Timeout)"}
+    
+    except httpx.HTTPStatusError as e:
+        print(f"HTTP 錯誤: {e.response.status_code}")
+        print(f"錯誤回應: {e.response.text}")
+        return {
+            "status": "ERROR", 
+            "message": f"HTTP 錯誤: {e.response.status_code}",
+            "response": e.response.text
+        }
+    
+    except Exception as e:
+        print(f"未知錯誤: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "ERROR", 
+            "message": f"未知錯誤: {str(e)}"
+        }
+    
+@router.get("/find-place-id")
+async def find_valid_place_id(request: Request, query: str = "台北101"):
+    """
+    動態搜尋景點並回傳最新的 Place ID
+    """
+    google_api_key = request.app.state.google_api_key
+    
+    # 使用 Text Search 搜尋景點
+    search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {
+        "query": query,
+        "key": google_api_key,
+        "language": "zh-TW"
+    }
+    
+    print(f"\n=== 搜尋景點: {query} ===")
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.get(search_url, params=params)
+            
+            print(f"Text Search 回應狀態碼: {res.status_code}")
+            
+            res.raise_for_status()
+            data = res.json()
+            
+            print(f"Text Search status: {data.get('status')}")
+            
+            if data.get("status") != "OK":
+                return {
+                    "success": False,
+                    "error": f"搜尋失敗: {data.get('status')}",
+                    "response": data
+                }
+            
+            results = data.get("results", [])
+            if not results:
+                return {
+                    "success": False,
+                    "error": "找不到景點"
+                }
+            
+            # 取第一個結果
+            place = results[0]
+            place_id = place.get("place_id")
+            name = place.get("name")
+            location = place.get("geometry", {}).get("location", {})
+            
+            print(f"找到景點: {name}")
+            print(f"Place ID: {place_id}")
+            print(f"座標: {location}")
+            
+            return {
+                "success": True,
+                "place_id": place_id,
+                "name": name,
+                "lat": location.get("lat"),
+                "lng": location.get("lng"),
+                "formatted_address": place.get("formatted_address"),
+                "full_response": place
+            }
+            
+    except Exception as e:
+        print(f"[ERROR] {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e)
+        }

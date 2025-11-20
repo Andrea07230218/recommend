@@ -39,6 +39,7 @@ def _shape_detail_for_fallback(det: Dict[str, Any]) -> Dict[str, Any]:
         "address": _first_non_empty(det.get("formatted_address")),
         "types": det.get("types", []) or [],
         "geometry": {"location": {"lat": loc.get("lat"), "lng": loc.get("lng")}},
+        "photos": det.get("photos", [])
     }
 
 def fallback_place_from_backup(
